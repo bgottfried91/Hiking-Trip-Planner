@@ -21,6 +21,9 @@ class Solution(object):
     
     def shuffle(self):
         random.shuffle(self.solutionList)
+        
+    def updateSet(self):
+        self.solutionSet=set(self.solutionList)
 
     def __hash__(self):
         return hash(tuple(self.solutionList))

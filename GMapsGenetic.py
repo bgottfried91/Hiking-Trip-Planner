@@ -10,6 +10,7 @@ import webbrowser
 import datetime
 import sys
 import string
+import argparse
 from lxml import etree
 from __builtin__ import str, int
 from DBManager import DatabaseManager
@@ -28,11 +29,8 @@ GOOGLE_MAPS_API_KEY = "AIzaSyDq2t0W22vTDbViGa3o6Zq-PJq8S3vLBl4"
 output_file = 'Output.html'
 
 #parameters for the Genetic algorithm
-thisRunGenerations=5000
+thisRunGenerations=2000
 thisRunPopulation_size=200
-#restLocs=set([42,43,44,29,30,31,32,28,21,22,23,24,15,16,17,19,3,4,5,6,7,8,9,25,62,63,64,65,66,67])
-#rest=Restrictions(datetime.datetime(2016,5,8),datetime.datetime(2016,6,22),"30577 Atlanta Lane, Westlake, OH 44145","Raleigh, NC",restLocs,datetime.time(hour=9),datetime.time(hour=20))
-#restLocs=set([])
 
 
 def compute_fitness_alt(solution,itinList,restrictions=None):
@@ -125,7 +123,6 @@ def compute_fitness_alt(solution,itinList,restrictions=None):
 	solution.endDate=date	#Record end date calculated here, to avoid recalculating it if not necessary
 	return solution_fitness
 		
-def compute_fitness(solution):
 	"""
 		This function returns the total distance traveled on the current road trip.
 		
@@ -169,6 +166,29 @@ def mutate_agent(sourceGenome, max_mutations=3,restrictions=None):
 			
 	return agent_genome
 
+def inject_agent(sourceGenome, max_mutations=3,restrictions=None):
+	"""
+		Creates an n-point injection of the sourceGenome
+		
+		An injection swaps a random waypoint in the road trip with a waypoint not in the list.
+	"""
+	
+	agent_genome = deepcopy(sourceGenome)	#Create new copy of object
+
+	num_mutations = random.randint(1, max_mutations)
+	
+	for mutation in range(num_mutations):
+		unused_itins=getWaypointSet(all_waypoints, restrictions, agent_genome)
+		list_index = random.randint(0, len(agent_genome.solutionList) - 1)	#Get index of itin to remove
+		swap_itin = random.sample(unused_itins,1)[0]								#Get itin to replace it with
+		agent_genome.solutionSet.remove(agent_genome.solutionList[list_index])	#Remove old itin from set
+		agent_genome.solutionList[list_index]=swap_itin						#Swap itins
+		agent_genome.solutionSet.add(swap_itin)								#Add new itin to set
+
+			
+	return agent_genome
+	
+
 def shuffle_mutation(sourceGenome,restrictions=None):
 	"""
 		Creates shuffle mutation of sourceGenome.
@@ -205,10 +225,28 @@ def generate_random_agent(restrictions=None):
 	"""
 		Creates a random road trip from the waypoints.
 	"""
-	new_random_agent = Solution(all_waypoints[:],restrictions)
+	new_random_agent = Solution(all_waypoints,restrictions)
 	random.shuffle(new_random_agent.solutionList)
 	applyRestrictions(new_random_agent,restrictions)
 	return new_random_agent
+	
+def makeReplenishedCopy(agent_genome,restrictions=None):
+	new_agent=deepcopy(agent_genome)
+	solEndDate=getSolutionEndDate(new_agent, restrictions)
+	waypoints=list(getWaypointSet(all_waypoints, restrictions, agent_genome))	#Create list of waypoints that should be used
+	random.shuffle(waypoints)	#Then randomize so we add them in random order
+	randomCount=0	
+	if restrictions.endDate is not None and randomCount<=len(waypoints)-1:
+		while solEndDate<restrictions.endDate:
+			newRandomLoc=getItinFromItinList(waypoints[randomCount])
+			solEndDate=addTime(solEndDate, days=newRandomLoc.los, restrictions=restrictions)
+			if (restrictions.endDate-solEndDate).days>0:	#If we haven't hit the end date yet, append and continue
+				new_agent.solutionList.append(newRandomLoc.id)
+				randomCount+=1
+			else:	#Otherwise, break the loop
+				break
+	new_agent.updateSet()
+	return new_agent
 	
 	
 def run_genetic_algorithm(generations=5000, population_size=100,itinList=[],restrictions=None):
@@ -275,10 +313,19 @@ def run_genetic_algorithm(generations=5000, population_size=100,itinList=[],rest
 			#===================================================================
 			new_population.append(deepcopy(agent_genome))
 			
+			# Create 1 replenished (as close to end date as possible) copy of solution
+			if restrictions.endDate is not None:
+				new_population.append(makeReplenishedCopy(agent_genome, restrictions))
+			
 			pointMuts=min(int(topPopcutoff*.2/2),len(agent_genome.solutionList)-1)
 			# Create offspring with 1-3 point mutations
 			for offspring in range(pointMuts):
 				new_population.append(mutate_agent(agent_genome,3,restrictions))
+				
+			injectMuts=min(int(topPopcutoff*.2/2),len(agent_genome.solutionList)-1)
+			#Create offspring with 1-3 injection mutations
+			for offspring in range(injectMuts):
+				new_population.append(inject_agent(agent_genome, 3, restrictions))
 				
 			shuffleMuts=min(int(topPopcutoff*.5/2),len(agent_genome.solutionList)-1)
 			# Create offspring with a single shuffle mutation
@@ -308,32 +355,58 @@ def run_genetic_algorithm(generations=5000, population_size=100,itinList=[],rest
 def applyRestrictions(solution,restrictions):
 	if restrictions.startLoc is not None:
 		getStartEndData(1, solution, restrictions.startLoc)
+	listTruncate=checkSolutionAgainstEndDate(solution, restrictions)
+	if len(solution.solutionList)>1: solution.solutionList=solution.solutionList[:listTruncate]	#Truncate list to the number of itins before the end date, but don't make it an empty list
+	if restrictions.endLoc is not None:
+		getStartEndData(2, solution, restrictions.endLoc)
+	solution.updateSet()	#After all restrictions are applied, update the set
+	return solution
+
+def getWaypointSet(waypointList,restrictions=None,solution=None):
+	outputSet=set(waypointList)	#First, create set of waypoint list
+	if restrictions is not None and restrictions.restrictedLocations is not None:
+		outputSet=outputSet-restrictions.restrictedLocations	#Next, remove any restricted locations
+	if solution is not None:
+		outputSet=outputSet-solution.solutionSet	#Finally, remove any locations that are already in the solution
+	return outputSet
+
+def checkSolutionAgainstEndDate(solution,restrictions):
 	if restrictions.endDate is not None:
 		try:
 			startDate=restrictions.startDate
 		except AttributeError:
 			startDate=datetime.datetime.today()	#If no start date specified, assume today
 		date=startDate
-		if restrictions.startLoc is not None:
+		try:
 			date=addTime(date, secs=waypoint_durations[frozenset([restrictions.startLoc,getItinFromItinList(solution.solutionList[0]).trailhead])],restrictions=restrictions)	#Add in driving time to first location
+		except AttributeError:
+			pass	#If no start location, don't add any extra time
 		prevItin=None
 		listLength=0
-		oldSolution=solution.solutionList[:]
 		for itin in solution.solutionList:
 			date = date + datetime.timedelta(days=itinList[itin].los) #Add LOS from current location to the date to be used for temp measurement
-			startPlusLOS=deepcopy(date)
 			if prevItin is not None: date = addTime(date,secs=waypoint_durations[frozenset([prevItin,itin])],restrictions=restrictions)	#Add travel time to most recent date
-			startPlusLOSPlusTravel= deepcopy(date)
 			if (date-restrictions.endDate).days<0: 
 				listLength+=1
 			else: break	#Don't bother continuing if we hit an end point
 			prevItin=itin
-		listTruncate=max(listLength-1,1)	#Need a minimum of 1, because if you truncate to the 0th element, it's an empty list
-		if len(solution.solutionList)>1: solution.solutionList=solution.solutionList[:listTruncate]	#Truncate list to the number of itins before the end date, but don't make it an empty list
-		if len(solution.solutionList)==0: print("List was truncated to nothing") 
-	if restrictions.endLoc is not None:
-		getStartEndData(2, solution, restrictions.endLoc)
-	return solution
+		return max(listLength-1,1)	#Need a minimum of 1, because if you truncate to the 0th element, it's an empty list
+
+def getSolutionEndDate(solution,restrictions):
+	try:
+			startDate=restrictions.startDate
+	except AttributeError:
+		startDate=datetime.datetime.today()	#If no start date specified, assume today
+	date=startDate
+	try:
+		date=addTime(date, secs=waypoint_durations[frozenset([restrictions.startLoc,getItinFromItinList(solution.solutionList[0]).trailhead])],restrictions=restrictions)	#Add in driving time to first location
+	except AttributeError:
+		pass	#If no start location, don't add any extra time
+	prevItin=None
+	for itin in solution.solutionList:
+		date = date + datetime.timedelta(days=itinList[itin].los) #Add LOS from current location to the date to be used for temp measurement
+		if prevItin is not None: date = addTime(date,secs=waypoint_durations[frozenset([prevItin,itin])],restrictions=restrictions)	#Add travel time to most recent date
+	return date
 
 def getItinList(db,restrictions=None):
 	outputList={}
@@ -363,54 +436,44 @@ def getItinFromItinList(itinId):
 	global itinList
 	return itinList[itinId]
 
-def checkRandoms(pop):
-	randDict={}
-	dupCount=0
-	for sol in pop:
-		if sol in randDict:
-			dupCount+=1
-		else:
-			randDict[sol]=1
-	print("Found {} duplicates in random solution".format(dupCount))
 
-def getRestrictions():
-	startDate=getDateFromString(sys.argv[1])
-	endDate=getDateFromString(sys.argv[2])
-	startLoc=sys.argv[3]
-	endLoc=sys.argv[4]
+def getParams(parser):
+	#Set up parameters
+	parser.add_argument("-sd","--StartDate",help="Enter the start date for the trip in the format MM/DD/YY. If not supplied, then today is used.")
+	parser.add_argument("-ed","--EndDate",help="Enter the end date for the trip in the format MM/DD/YY. If not supplied, then no end date is assumed.")
+	parser.add_argument("-sl","--StartLoc",help="Enter the starting location for the trip in standard US address format. If not supplied, then no location is assumed.")
+	parser.add_argument("-el","--EndLoc",help="Enter the ending location for the trip in standard US address format. If not supplied, then no location is assumed.")
+	parser.add_argument("-rl","--RestrictedLocations",help="Enter a comma-separated string of itinerary IDs that should be ignored when building the list of locations. If none are supplied, all in the database are used.")
+	parser.add_argument("-mt","--MorningTime",help="Enter the time before which no driving should be considered in 24hr HH:MM:SS format. I.E. if you don't want to start driving on any day before 8am, enter 08:00:00.")
+	parser.add_argument("-et","--EveningTime",help="Enter the time after which no driving should be considered in 24hr HH:MM:SS format. I.E. if you don't want to start driving on any day after 9pm, enter 21:00:00.")
+	parser.add_argument("-od","--OutputDirectory",help="Enter the file path to which to output the XML file of the route.")
+	return parser.parse_args()
+
+def getRestrictions(params):
+	startDate=getDateFromString(params.StartDate)
+	endDate=getDateFromString(params.EndDate)
+	startLoc=params.StartLoc
+	endLoc=params.EndLoc
 	restLocs=set()
-	for loc in sys.argv[5].split(","):
-		restLocs.add(int(loc.strip(string.punctuation)))
-	morningTime=getTimeFromString(sys.argv[6])
-	eveningTime=getTimeFromString(sys.argv[7])
+	if len(params.RestrictedLocations)>0:
+		for loc in params.RestrictedLocations.split(","):
+			restLocs.add(int(loc.strip(string.punctuation)))
+	morningTime=getTimeFromString(params.MorningTime)
+	eveningTime=getTimeFromString(params.EveningTime)
 	return Restrictions(sd=startDate,ed=endDate,sl=startLoc,el=endLoc,rLocs=restLocs,startDriveTime=morningTime,endDriveTime=eveningTime)
 	
 def getDateFromString(string):
-	return datetime.datetime.strptime(string,"%x")
+	if string is not None:
+		return datetime.datetime.strptime(string,"%x")
+	else:
+		return None
 
 def getTimeFromString(string):
 	return (datetime.datetime.strptime(string,"%X").time())
 
-def testFitness():
-	restLocs=set([42,43,44,29,30,31,32,28,21,22,23,24,15,16,17,19,3,4,5,6,7,8,9,25,62,63,64,65,66,67])
-	rest=Restrictions(datetime.datetime(2016,5,8),datetime.datetime(2016,6,22),"30577 Atlanta Lane, Westlake, OH 44145","Raleigh, NC",restLocs,datetime.time(hour=9),datetime.time(hour=20))
-	db=DatabaseManager("hikingData.db")
-	itinList=getItinList(db, rest)
-	solution=Solution([41, 96, 98, 46, 13, 68, 69, 88, 33, 53, 49, 57, 80, 85, 86],rest)
-	waypoint_distances={}
-	waypoint_durations={}
-	for row in db.query("select * from waypoints"):	#populate distances and durations arrays from SQL database
-			waypoint_distances[frozenset([row[0],row[1]])] = row[4]
-			waypoint_durations[frozenset([row[0],row[1]])] = row[5]
-	prevFitness=None
-	for index in range(1,100):
-		fitness=compute_fitness_alt(solution, itinList, rest)
-		if prevFitness is not None and fitness!=prevFitness:
-			print("This solution's fitness changed from {} to {}:".format(prevFitness,fitness))
-		prevFitness=fitness
 		
 #Output functions		
-def createXML(db,solution,itinList,restrictions):
+def createXML(db,solution,itinList,restrictions,outputDirectory=None):
 	try:
 		startDate=restrictions.startDate
 	except AttributeError:
@@ -479,22 +542,25 @@ def createXML(db,solution,itinList,restrictions):
 		endNode.text=str(endLoc)
 		endDate=addTime(date, secs=waypoint_durations[frozenset([getItinFromItinList(prevLocation).trailhead,endLoc])],restrictions=restrictions)
 		etree.SubElement(endNode,"arrivalDate").text=str(endDate.isoformat())
-	#print(etree.tostringlist(root, pretty_print=True))
-	open("secondLeg/route"+fitness+".xml","wb").write(etree.tostring(root, pretty_print=True))
+	if outputDirectory is not None:
+		fPath=outputDirectory+"/route"+fitness+".xml"
+	else:
+		fPath="route"+fitness+".xml"
+	open(fPath,"wb").write(etree.tostring(root, pretty_print=True))
 	xslt=etree.XSLT(etree.parse("xslTrans.xsl"))
 	html=xslt(root)
 	html.write("route.html")
-	webbrowser.open_new_tab("route.html")
+	#webbrowser.open_new_tab("route.html")
 	
 
 if __name__ == '__main__':
 	# if this file exists, read the data stored in it - if not then collect data by asking google
-	print("Begin finding shortest route")
-	rest=getRestrictions()
-	all_waypoints = []
+	parser=argparse.ArgumentParser()
+	params=getParams(parser)
+	rest=getRestrictions(params)
+	all_waypoints = set()
 	dbManager = DatabaseManager("hikingData.db")
 	#Global settings; change these to modify how the program calculates the route
-	#rest=None
 	conn = dbManager.conn
 	cursor = conn.cursor()
 	itins = cursor.execute("select * from itin")
@@ -502,13 +568,13 @@ if __name__ == '__main__':
 	waypoint_distances={}
 	waypoint_durations={}
 	for itin in itinList:
-		all_waypoints.append(itin)
+		all_waypoints.add(itin)
 	for row in dbManager.query("select * from waypoints"):	#populate distances and durations arrays from SQL database
 			waypoint_distances[frozenset([row[0],row[1]])] = row[4]
 			waypoint_durations[frozenset([row[0],row[1]])] = row[5]
 	print("Search for optimal route")
 	optimal_route = run_genetic_algorithm(generations=thisRunGenerations, population_size=thisRunPopulation_size,itinList=itinList,restrictions=rest)
-	createXML(dbManager, optimal_route, itinList,rest)
+	createXML(dbManager, optimal_route, itinList,rest,params.OutputDirectory)
 	#CreateOptimalRouteHtmlFile(optimal_route, 0)
 	
 
